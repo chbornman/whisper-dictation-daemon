@@ -1,0 +1,21 @@
+[Unit]
+Description=Whisper Dictation Daemon with Persistent Model
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+User=caleb
+Group=caleb
+WorkingDirectory=/home/caleb/whisper-dictation-daemon
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/bin/python /home/caleb/whisper-dictation-daemon/whisper_daemon.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
