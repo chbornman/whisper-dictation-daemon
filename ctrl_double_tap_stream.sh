@@ -4,7 +4,7 @@
 # Double-tap to start, single tap to stop
 TEMP_FILE="/tmp/ctrl_tap_stream"
 RECORDING_FILE="/tmp/whisper_stream_recording"
-TIMEOUT=0.1  # seconds between taps (minimal delay)
+TIMEOUT=0.2  # seconds between taps (balanced speed/reliability)
 SCRIPT_DIR="$HOME/projects/whisper-dictation-daemon"
 
 # Check if currently streaming
