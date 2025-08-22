@@ -125,8 +125,8 @@ class WhisperStreamingDaemon:
         self.server_socket = None
         
         # Sound file paths
-        self.start_sound = "/home/caleb/whisper-dictation-daemon/tr707-snare-drum-241412.mp3"
-        self.stop_sound = "/home/caleb/whisper-dictation-daemon/echoed-hi-hats-89491.mp3"
+        self.start_sound = "/home/caleb/projects/whisper-dictation-daemon/snare.mp3"
+        self.stop_sound = "/home/caleb/projects/whisper-dictation-daemon/hihat.mp3"
         
         # Load model once at startup
         self.load_model()

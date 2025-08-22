@@ -5,7 +5,7 @@
 TEMP_FILE="/tmp/ctrl_tap_nostream"
 RECORDING_FILE="/tmp/whisper_nostream_recording"
 TIMEOUT=0.5  # seconds between taps
-SCRIPT_DIR="$HOME/whisper-dictation-daemon"
+SCRIPT_DIR="$HOME/projects/whisper-dictation-daemon"
 
 # Check if currently recording
 if [ -f "$RECORDING_FILE" ]; then

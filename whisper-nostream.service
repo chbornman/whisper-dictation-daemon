@@ -6,8 +6,8 @@ After=multi-user.target
 Type=simple
 User=caleb
 Group=caleb
-WorkingDirectory=/home/caleb/whisper-dictation-daemon
-ExecStart=/usr/bin/python3 /home/caleb/whisper-dictation-daemon/whisper_streaming.py -n
+WorkingDirectory=/home/caleb/projects/whisper-dictation-daemon
+ExecStart=/usr/bin/python3 /home/caleb/projects/whisper-dictation-daemon/whisper_streaming.py -n
 Restart=always
 RestartSec=5
 
