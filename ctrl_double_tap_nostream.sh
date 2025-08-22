@@ -4,14 +4,14 @@
 # Double-tap to start, single tap to stop
 TEMP_FILE="/tmp/ctrl_tap_nostream"
 RECORDING_FILE="/tmp/whisper_nostream_recording"
-TIMEOUT=0.5  # seconds between taps
+TIMEOUT=0.3  # seconds between taps (reduced for faster response)
 SCRIPT_DIR="$HOME/projects/whisper-dictation-daemon"
 
 # Check if currently recording
 if [ -f "$RECORDING_FILE" ]; then
     # Recording active - single tap stops it
     rm -f "$RECORDING_FILE"
-    python3 "$SCRIPT_DIR/whisper_streaming.py" -n -c stop
+    "$SCRIPT_DIR/fast_client" nostream stop
     exit 0
 fi
 
@@ -27,7 +27,7 @@ if [ -f "$TEMP_FILE" ]; then
         # Second tap detected - start recording
         rm -f "$TEMP_FILE"
         touch "$RECORDING_FILE"
-        python3 "$SCRIPT_DIR/whisper_streaming.py" -n -c start
+        "$SCRIPT_DIR/fast_client" nostream start
         exit 0
     fi
 fi
