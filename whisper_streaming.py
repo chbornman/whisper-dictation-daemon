@@ -80,7 +80,7 @@ class LocalAgreementBuffer:
         return prefix
 
 class WhisperStreamingDaemon:
-    def __init__(self, algorithm="local-agreement", model_size="large-v3"):
+    def __init__(self, algorithm="local-agreement", model_size="large-v3", no_streaming=False):
         self.sample_rate = 16000
         self.recording = False
         self.streaming = False
@@ -88,6 +88,7 @@ class WhisperStreamingDaemon:
         self.model_loaded = False
         self.algorithm = algorithm
         self.model_size = model_size
+        self.no_streaming = no_streaming  # If True, wait for complete recording
         
         # Algorithm-specific parameters
         if algorithm == "local-agreement":
@@ -197,9 +198,13 @@ class WhisperStreamingDaemon:
         # Play start sound
         self.play_sound(self.start_sound)
         
-        logger.info(f"Starting streaming with {self.algorithm}... Press Ctrl to stop")
+        if self.no_streaming:
+            logger.info("Recording audio (non-streaming mode)... Press Ctrl to stop")
+        else:
+            logger.info(f"Starting streaming with {self.algorithm}... Press Ctrl to stop")
+        
         self.recording = True
-        self.streaming = True
+        self.streaming = not self.no_streaming  # Only stream if not in no_streaming mode
         self.audio_buffer = []
         
         # Reset algorithm-specific state
@@ -213,6 +218,10 @@ class WhisperStreamingDaemon:
                 # Add to buffer
                 audio_chunk = indata.copy().flatten()
                 self.audio_buffer.extend(audio_chunk)
+                
+                # If no_streaming mode, just collect audio, don't process yet
+                if self.no_streaming:
+                    return
                 
                 # Check if we have enough for processing
                 if self.algorithm == "sliding-window":
@@ -246,19 +255,48 @@ class WhisperStreamingDaemon:
             while self.recording and not self.interrupted:
                 sd.sleep(100)
         
-        # Process any remaining audio
-        if len(self.audio_buffer) > int(0.5 * self.sample_rate):
-            final_chunk = np.array(self.audio_buffer)
-            self.audio_queue.put(final_chunk)
+        # Handle end of recording differently for no_streaming mode
+        if self.no_streaming:
+            # Process the entire recording at once
+            if self.audio_buffer:
+                logger.info(f"Processing complete recording ({len(self.audio_buffer)/self.sample_rate:.1f}s)...")
+                full_audio = np.array(self.audio_buffer)
+                
+                # Transcribe the entire audio
+                try:
+                    segments, info = self.model.transcribe(
+                        full_audio,
+                        language="en",
+                        beam_size=5,
+                        temperature=0.0,
+                        vad_filter=True
+                    )
+                    
+                    # Output all text at once
+                    full_text = " ".join([segment.text.strip() for segment in segments])
+                    if full_text:
+                        self.transcription_queue.put(full_text)
+                        logger.info("Transcription complete")
+                        
+                except Exception as e:
+                    logger.error(f"Transcription error: {e}")
+            
+            self.transcription_queue.put(None)
+        else:
+            # Process any remaining audio for streaming mode
+            if len(self.audio_buffer) > int(0.5 * self.sample_rate):
+                final_chunk = np.array(self.audio_buffer)
+                self.audio_queue.put(final_chunk)
+            
+            # Signal end of stream
+            self.audio_queue.put(None)
         
-        # Signal end of stream
-        self.audio_queue.put(None)
         self.streaming = False
         
         # Play stop sound
         self.play_sound(self.stop_sound)
         
-        logger.info("Streaming stopped")
+        logger.info("Recording stopped")
 
     def process_audio_local_agreement(self):
         """Process audio chunks with Local Agreement algorithm"""
@@ -630,6 +668,9 @@ def main():
     parser.add_argument('--model', '-m',
                        default='large-v3',
                        help='Whisper model size (default: large-v3)')
+    parser.add_argument('--no-streaming', '-n',
+                       action='store_true',
+                       help='Wait for complete recording before transcribing (non-streaming mode)')
     parser.add_argument('--file', '-f',
                        help='Process an audio file instead of starting daemon')
     parser.add_argument('--client', '-c',
@@ -680,7 +721,11 @@ def main():
         return
     
     # Create daemon
-    daemon = WhisperStreamingDaemon(algorithm=args.algorithm, model_size=args.model)
+    daemon = WhisperStreamingDaemon(
+        algorithm=args.algorithm, 
+        model_size=args.model,
+        no_streaming=args.no_streaming
+    )
     
     # File processing mode
     if args.file:
