@@ -16,6 +16,9 @@ import queue
 import io
 from pathlib import Path
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import scipy.io.wavfile as wavfile
@@ -26,6 +29,14 @@ from faster_whisper import WhisperModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+@dataclass
+class TranscriptionTask:
+    """Represents a transcription task with metadata"""
+    task_id: int
+    audio_data: np.ndarray
+    timestamp: float
+    context_length: float  # Length of audio in seconds
+
 class LocalAgreementBuffer:
     """
     Implements the Local Agreement-n algorithm for streaming transcription.
@@ -35,25 +46,36 @@ class LocalAgreementBuffer:
         self.n = n  # Number of agreements needed
         self.history = deque(maxlen=n)
         self.confirmed_text = ""
+        self.lock = threading.Lock()
         
-    def update(self, new_text):
+    def update(self, new_text, task_id):
         """Update with new transcription and return confirmed text if any"""
-        self.history.append(new_text)
-        
-        if len(self.history) < self.n:
-            return None  # Not enough history yet
-        
-        # Find common prefix among all texts in history
-        common_prefix = self.find_common_prefix(list(self.history))
-        
-        # Check if we have new confirmed text
-        if common_prefix and len(common_prefix) > len(self.confirmed_text):
-            # Find the new portion
-            new_confirmed = common_prefix[len(self.confirmed_text):]
-            self.confirmed_text = common_prefix
-            return new_confirmed
-        
-        return None
+        with self.lock:
+            self.history.append((task_id, new_text))
+            
+            # Sort by task_id to maintain order
+            sorted_history = sorted(list(self.history), key=lambda x: x[0])
+            texts = [text for _, text in sorted_history]
+            
+            if len(texts) < self.n:
+                return None  # Not enough history yet
+            
+            # Only check agreement if we have consecutive task IDs
+            task_ids = [tid for tid, _ in sorted_history]
+            if task_ids[-1] - task_ids[0] != len(task_ids) - 1:
+                return None  # Missing some tasks in between
+            
+            # Find common prefix among all texts in history
+            common_prefix = self.find_common_prefix(texts)
+            
+            # Check if we have new confirmed text
+            if common_prefix and len(common_prefix) > len(self.confirmed_text):
+                # Find the new portion
+                new_confirmed = common_prefix[len(self.confirmed_text):]
+                self.confirmed_text = common_prefix
+                return new_confirmed
+            
+            return None
     
     def find_common_prefix(self, texts):
         """Find the longest common prefix among all texts"""
@@ -359,21 +381,76 @@ class WhisperStreamingDaemon:
         logger.info("Recording stopped")
 
     def process_audio_local_agreement(self):
-        """Process audio chunks with Local Agreement algorithm"""
+        """Process audio chunks with Parallel Local Agreement algorithm"""
         context_audio = []  # Keep growing context
         last_full_text = ""
+        task_counter = 0
+        
+        # Thread pool for parallel transcriptions
+        executor = ThreadPoolExecutor(max_workers=3)  # 3 parallel transcriptions
+        pending_tasks = {}  # task_id -> Future
+        completed_results = {}  # task_id -> transcription text
+        
+        # Separate thread for handling completed transcriptions
+        def process_completed_transcriptions():
+            next_task_to_check = 0
+            
+            while True:
+                # Check for completed tasks in order
+                if next_task_to_check in completed_results:
+                    text = completed_results[next_task_to_check]
+                    
+                    # Update local agreement buffer
+                    confirmed_text = self.local_agreement.update(text, next_task_to_check)
+                    
+                    if confirmed_text:
+                        self.transcription_queue.put(confirmed_text)
+                        logger.info(f"Confirmed: {confirmed_text[:50]}...")
+                    
+                    # Clean up
+                    del completed_results[next_task_to_check]
+                    next_task_to_check += 1
+                    
+                time.sleep(0.01)  # Small delay to avoid busy waiting
+        
+        # Start the completion handler thread
+        completion_thread = threading.Thread(target=process_completed_transcriptions, daemon=True)
+        completion_thread.start()
+        
+        def transcribe_audio(task):
+            """Worker function for thread pool"""
+            try:
+                logger.info(f"Task {task.task_id}: Transcribing {task.context_length:.1f}s")
+                segments, info = self.model.transcribe(
+                    task.audio_data,
+                    language="en",
+                    beam_size=5,
+                    temperature=0.0,
+                    vad_filter=True,
+                    without_timestamps=True
+                )
+                
+                full_text = " ".join([segment.text.strip() for segment in segments])
+                logger.info(f"Task {task.task_id}: Complete")
+                return task.task_id, full_text
+            except Exception as e:
+                logger.error(f"Task {task.task_id} failed: {e}")
+                return task.task_id, ""
         
         while True:
             try:
-                chunk = self.audio_queue.get(timeout=1)
+                chunk = self.audio_queue.get(timeout=0.1)  # Shorter timeout for responsiveness
                 
                 if chunk is None:
-                    # Output any remaining unconfirmed text at the end
+                    # Shutdown signal - wait for pending tasks
+                    executor.shutdown(wait=True)
+                    
+                    # Output any remaining unconfirmed text
                     if last_full_text and len(last_full_text) > len(self.local_agreement.confirmed_text):
                         remaining = last_full_text[len(self.local_agreement.confirmed_text):]
                         self.transcription_queue.put(remaining)
                     self.transcription_queue.put(None)
-                    continue
+                    break
                 
                 # Skip if too quiet
                 if np.max(np.abs(chunk)) < self.silence_threshold:
@@ -387,37 +464,55 @@ class WhisperStreamingDaemon:
                 if len(context_audio) > max_samples:
                     context_audio = context_audio[-max_samples:]
                 
-                # Transcribe the full context
-                logger.info(f"Processing {len(context_audio)/self.sample_rate:.1f}s of audio...")
+                # Create transcription task
+                task = TranscriptionTask(
+                    task_id=task_counter,
+                    audio_data=np.array(context_audio.copy()),  # Copy to avoid race conditions
+                    timestamp=time.time(),
+                    context_length=len(context_audio)/self.sample_rate
+                )
                 
-                try:
-                    segments, info = self.model.transcribe(
-                        np.array(context_audio),
-                        language="en",
-                        beam_size=5,
-                        temperature=0.0,
-                        vad_filter=True,
-                        without_timestamps=True
-                    )
-                    
-                    # Collect full transcription
-                    full_text = " ".join([segment.text.strip() for segment in segments])
-                    
-                    if full_text:
-                        # Update local agreement buffer
-                        confirmed_text = self.local_agreement.update(full_text)
-                        
-                        if confirmed_text:
-                            self.transcription_queue.put(confirmed_text)
-                            logger.info(f"Confirmed: {confirmed_text}")
-                        
-                        last_full_text = full_text
-                        
-                except Exception as e:
-                    logger.error(f"Transcription error: {e}")
+                # Submit task to thread pool (non-blocking)
+                future = executor.submit(transcribe_audio, task)
+                pending_tasks[task_counter] = future
+                task_counter += 1
+                
+                # Check for completed tasks
+                completed = []
+                for task_id, future in pending_tasks.items():
+                    if future.done():
+                        try:
+                            tid, text = future.result(timeout=0)
+                            completed_results[tid] = text
+                            completed.append(task_id)
+                            last_full_text = text
+                        except:
+                            pass
+                
+                # Clean up completed tasks
+                for task_id in completed:
+                    del pending_tasks[task_id]
+                
+                # Log status
+                if len(pending_tasks) > 0:
+                    logger.info(f"Tasks in flight: {len(pending_tasks)}, Completed waiting: {len(completed_results)}")
                     
             except queue.Empty:
-                continue
+                # Check for completed tasks even when no new audio
+                completed = []
+                for task_id, future in pending_tasks.items():
+                    if future.done():
+                        try:
+                            tid, text = future.result(timeout=0)
+                            completed_results[tid] = text
+                            completed.append(task_id)
+                            last_full_text = text
+                        except:
+                            pass
+                
+                for task_id in completed:
+                    del pending_tasks[task_id]
+                    
             except Exception as e:
                 logger.error(f"Audio processing error: {e}")
 
