@@ -51,32 +51,53 @@ class LocalAgreementBuffer:
     """
     def __init__(self, n=2):
         self.n = n  # Number of agreements needed
-        self.history = deque(maxlen=n)
+        self.transcriptions = {}  # task_id -> text
         self.confirmed_text = ""
         self.lock = threading.Lock()
+        self.last_checked_id = -1
         
     def update(self, new_text, task_id):
         """Update with new transcription and return confirmed text if any"""
         with self.lock:
-            # Just keep the last n transcriptions, regardless of task_id
-            self.history.append(new_text)
+            # Store the transcription
+            self.transcriptions[task_id] = new_text
+            logger.info(f"Stored task {task_id}, total stored: {len(self.transcriptions)}")
             
-            if len(self.history) < self.n:
-                return None  # Not enough history yet
+            # Try to find consecutive agreements
+            confirmed_texts = []
             
-            # Get the last n texts
-            recent_texts = list(self.history)
+            # Check if we can form any consecutive sequences
+            for start_id in range(self.last_checked_id + 1, task_id + 1):
+                # Check if we have n consecutive tasks starting from start_id
+                consecutive_texts = []
+                for i in range(self.n):
+                    if start_id + i in self.transcriptions:
+                        consecutive_texts.append(self.transcriptions[start_id + i])
+                    else:
+                        break  # Missing a task in sequence
+                
+                # If we have n consecutive transcriptions
+                if len(consecutive_texts) == self.n:
+                    # Find common prefix
+                    common_prefix = self.find_common_prefix(consecutive_texts)
+                    
+                    # Check if we have new confirmed text
+                    if common_prefix and len(common_prefix) > len(self.confirmed_text):
+                        # Find the new portion
+                        new_confirmed = common_prefix[len(self.confirmed_text):]
+                        self.confirmed_text = common_prefix
+                        self.last_checked_id = start_id + self.n - 1
+                        logger.info(f"Agreement found between tasks {start_id}-{start_id+self.n-1}! New text: {new_confirmed[:50]}...")
+                        confirmed_texts.append(new_confirmed)
             
-            # Find common prefix among recent texts
-            common_prefix = self.find_common_prefix(recent_texts)
+            # Clean up old transcriptions we don't need anymore
+            for tid in list(self.transcriptions.keys()):
+                if tid <= self.last_checked_id - self.n:
+                    del self.transcriptions[tid]
             
-            # Check if we have new confirmed text
-            if common_prefix and len(common_prefix) > len(self.confirmed_text):
-                # Find the new portion
-                new_confirmed = common_prefix[len(self.confirmed_text):]
-                self.confirmed_text = common_prefix
-                logger.info(f"Agreement found! New text: {new_confirmed[:50]}...")
-                return new_confirmed
+            # Return all newly confirmed text
+            if confirmed_texts:
+                return " ".join(confirmed_texts)
             
             return None
     
