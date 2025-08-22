@@ -164,30 +164,10 @@ class WhisperStreamingDaemon:
         
         logger.info("Streaming stopped")
 
-    def find_overlap(self, prev_text, new_text, min_overlap=3):
-        """Find overlapping text between two strings"""
-        if not prev_text or not new_text:
-            return 0
-        
-        prev_words = prev_text.split()
-        new_words = new_text.split()
-        
-        if len(prev_words) < min_overlap or len(new_words) < min_overlap:
-            return 0
-        
-        # Check for overlap at word boundaries
-        max_overlap = min(len(prev_words), len(new_words), 15)  # Check up to 15 words
-        
-        for overlap_size in range(max_overlap, min_overlap - 1, -1):
-            # Check if the last N words of prev match the first N words of new
-            if prev_words[-overlap_size:] == new_words[:overlap_size]:
-                return overlap_size
-        
-        return 0
-    
     def process_audio_chunks(self):
         """Process audio chunks in background thread"""
-        previous_context = ""
+        all_audio = []  # Keep all audio for full transcription at the end
+        last_transcribed_position = 0  # Track what we've already transcribed
         
         while True:
             try:
@@ -199,11 +179,14 @@ class WhisperStreamingDaemon:
                     self.transcription_queue.put(None)
                     continue
                 
+                # Add to our complete audio buffer
+                all_audio.extend(chunk[:self.stride_samples])  # Only add the new 1 second
+                
                 # Skip if too quiet (silence)
                 if np.max(np.abs(chunk)) < self.silence_threshold:
                     continue
                 
-                # Transcribe the chunk
+                # Transcribe the full chunk (3 seconds)
                 logger.info(f"Processing {len(chunk)/self.sample_rate:.1f}s chunk...")
                 
                 try:
@@ -214,37 +197,24 @@ class WhisperStreamingDaemon:
                         beam_size=5,
                         best_of=5,
                         temperature=0.0,
-                        condition_on_previous_text=True,  # Use previous context
-                        initial_prompt=previous_context[-250:] if previous_context else None,  # Use last 250 chars as context
+                        condition_on_previous_text=False,  # Don't condition to avoid cascading errors
                         vad_filter=True,  # Use VAD to filter out silence
                         vad_parameters=dict(
                             min_speech_duration_ms=100,
                             min_silence_duration_ms=100
                         ),
-                        without_timestamps=True  # Disable timestamps for cleaner text
+                        without_timestamps=False  # Keep timestamps for alignment
                     )
                     
-                    # Collect text from segments
-                    full_text = " ".join([segment.text.strip() for segment in segments])
-                    
-                    if full_text:
-                        # Better deduplication using word-level overlap detection
-                        if self.last_chunk_text:
-                            overlap_words = self.find_overlap(self.last_chunk_text, full_text)
-                            if overlap_words > 0:
-                                # Remove the overlapping words from the beginning
-                                new_words = full_text.split()[overlap_words:]
-                                new_text = " ".join(new_words)
-                                logger.info(f"Removed {overlap_words} overlapping words")
-                            else:
-                                new_text = full_text
-                        else:
-                            new_text = full_text
-                        
-                        if new_text:
-                            self.transcription_queue.put(new_text)
-                            previous_context = full_text  # Update context for next chunk
-                            self.last_chunk_text = full_text
+                    # Only output text from the middle portion to avoid edge effects
+                    # Since we have 2s overlap, output text from 0.5s to 1.5s mark
+                    for segment in segments:
+                        # Check if segment is in our target window (0.5s to 1.5s)
+                        if segment.start >= 0.5 and segment.start < 1.5:
+                            text = segment.text.strip()
+                            if text:
+                                self.transcription_queue.put(text + " ")
+                                logger.info(f"Streamed: {text}")
                         
                 except Exception as e:
                     logger.error(f"Transcription error: {e}")
