@@ -13,6 +13,7 @@ import time
 import socket
 import threading
 import queue
+import io
 from pathlib import Path
 from collections import deque
 
@@ -124,9 +125,10 @@ class WhisperStreamingDaemon:
             self.socket_path = f"/tmp/whisper_streaming_{algorithm}_daemon.sock"
         self.server_socket = None
         
-        # Sound file paths (WAV for faster playback)
-        self.start_sound = "/home/caleb/projects/whisper-dictation-daemon/snare.wav"
-        self.stop_sound = "/home/caleb/projects/whisper-dictation-daemon/hihat.wav"
+        # Preload sounds into memory for instant playback
+        self.start_sound_path = "/home/caleb/projects/whisper-dictation-daemon/snare.wav"
+        self.stop_sound_path = "/home/caleb/projects/whisper-dictation-daemon/hihat.wav"
+        self.preload_sounds()
         
         # Load model once at startup
         self.load_model()
@@ -138,6 +140,34 @@ class WhisperStreamingDaemon:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
+    def preload_sounds(self):
+        """Preload sound files into memory for instant playback"""
+        try:
+            # Load WAV files into memory
+            rate1, self.start_sound_data = wavfile.read(self.start_sound_path)
+            rate2, self.stop_sound_data = wavfile.read(self.stop_sound_path)
+            
+            # Convert to float32 for sounddevice
+            self.start_sound_data = self.start_sound_data.astype(np.float32) / 32768.0
+            self.stop_sound_data = self.stop_sound_data.astype(np.float32) / 32768.0
+            
+            self.sound_rate = rate1  # Assuming both files have same rate
+            logger.info("Sound files preloaded into memory")
+        except Exception as e:
+            logger.error(f"Failed to preload sounds: {e}")
+            # Fallback to file-based playback
+            self.start_sound_data = None
+            self.stop_sound_data = None
+    
+    def play_sound_memory(self, sound_data):
+        """Play preloaded sound from memory using sounddevice"""
+        if sound_data is not None:
+            try:
+                # Non-blocking play
+                sd.play(sound_data, self.sound_rate)
+            except Exception as e:
+                logger.error(f"Failed to play sound from memory: {e}")
+    
     def load_model(self):
         """Load the Whisper model once at startup"""
         logger.info(f"Loading faster-whisper {self.model_size} model on CPU...")
@@ -186,37 +216,36 @@ class WhisperStreamingDaemon:
         sys.exit(0)
 
     def play_sound(self, sound_file):
-        """Play a sound file using aplay (faster) or ffplay as fallback"""
+        """Play a sound file using fastest available method"""
         try:
-            # Try aplay first (faster startup)
+            # Try paplay first (PulseAudio - fastest)
             subprocess.Popen(
-                ["aplay", "-q", sound_file],
+                ["paplay", sound_file],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
         except FileNotFoundError:
-            # Fallback to ffplay if aplay not available
             try:
+                # Fallback to aplay
                 subprocess.Popen(
-                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", sound_file],
+                    ["aplay", "-q", sound_file],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
-            except Exception as e:
-                logger.error(f"Failed to play sound {sound_file}: {e}")
+            except FileNotFoundError:
+                # Final fallback to ffplay
+                try:
+                    subprocess.Popen(
+                        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", sound_file],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to play sound {sound_file}: {e}")
 
     def start_streaming_recording(self):
         """Start recording with streaming transcription"""
-        # Play start sound
-        self.play_sound(self.start_sound)
-        
-        if self.no_streaming:
-            logger.info("Recording audio (non-streaming mode)... Press Ctrl to stop")
-        else:
-            logger.info(f"Starting streaming with {self.algorithm}... Press Ctrl to stop")
-        
-        self.recording = True
-        self.streaming = not self.no_streaming  # Only stream if not in no_streaming mode
+        # Set up everything FIRST
         self.audio_buffer = []
         
         # Reset algorithm-specific state
@@ -225,6 +254,7 @@ class WhisperStreamingDaemon:
         elif self.algorithm == "sliding-window":
             self.last_chunk_text = ""
         
+        # Prepare the audio callback
         def audio_callback(indata, frames, time, status):
             if self.recording:
                 # Add to buffer
@@ -257,6 +287,16 @@ class WhisperStreamingDaemon:
                             self.audio_buffer = []
                         
                         self.audio_queue.put(np.array(chunk_to_process))
+        
+        # Now everything is ready - play the sound and start recording
+        self.play_sound_memory(self.start_sound_data)
+        self.recording = True
+        self.streaming = not self.no_streaming
+        
+        if self.no_streaming:
+            logger.info("Recording audio (non-streaming mode)... Press Ctrl to stop")
+        else:
+            logger.info(f"Starting streaming with {self.algorithm}... Press Ctrl to stop")
         
         with sd.InputStream(
             samplerate=self.sample_rate, 
@@ -305,8 +345,7 @@ class WhisperStreamingDaemon:
         
         self.streaming = False
         
-        # Play stop sound
-        self.play_sound(self.stop_sound)
+        # Stop sound already played in handle_client for faster response
         
         # Clean up recording flag file
         if self.no_streaming:
@@ -630,19 +669,24 @@ class WhisperStreamingDaemon:
             data = client_socket.recv(1024).decode()
             if data == "STREAM_START":
                 if not self.streaming and not self.recording:
-                    threading.Thread(target=self.start_streaming_recording).start()
+                    # Send response FIRST for fastest client return
                     if self.no_streaming:
                         client_socket.send(b"RECORDING")
                     else:
                         client_socket.send(b"STREAMING")
+                    # Start recording thread (it will play sound when ready)
+                    threading.Thread(target=self.start_streaming_recording).start()
                 else:
                     if self.no_streaming:
                         client_socket.send(b"ALREADY_RECORDING")
                     else:
                         client_socket.send(b"ALREADY_STREAMING")
             elif data == "STREAM_STOP":
-                self.recording = False
+                # Send response first
                 client_socket.send(b"STOPPED")
+                # Then play sound and stop
+                self.play_sound_memory(self.stop_sound_data)
+                self.recording = False
             elif data == "STATUS":
                 if self.recording:
                     status = "RECORDING" if self.no_streaming else "STREAMING"
