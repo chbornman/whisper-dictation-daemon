@@ -26,7 +26,14 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("/tmp/whisper_streaming.log", mode='a')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -115,8 +122,8 @@ class WhisperStreamingDaemon:
         
         # Algorithm-specific parameters
         if algorithm == "local-agreement":
-            self.chunk_duration = 2.0  # Process 2-second chunks
-            self.max_buffer_duration = 10.0  # Maximum buffer size
+            self.chunk_duration = 1.5  # Process 1.5-second chunks (faster)
+            self.max_buffer_duration = 4.0  # Maximum buffer size (reduced)
         elif algorithm == "sliding-window":
             self.chunk_duration = 3.0  # Total chunk size to process
             self.stride_duration = 1.0  # Move forward by 1 second each time
@@ -267,6 +274,10 @@ class WhisperStreamingDaemon:
 
     def start_streaming_recording(self):
         """Start recording with streaming transcription"""
+        # Clear log file for new recording
+        with open("/tmp/whisper_streaming.log", "w") as f:
+            f.write(f"=== New Recording Started at {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        
         # Set up everything FIRST
         self.audio_buffer = []
         
@@ -385,17 +396,22 @@ class WhisperStreamingDaemon:
         context_audio = []  # Keep growing context
         last_full_text = ""
         task_counter = 0
+        last_task_submitted = -1  # Track last submitted task to avoid duplicates
+        chunk_samples = int(self.chunk_duration * self.sample_rate)
         
         # Thread pool for parallel transcriptions
         executor = ThreadPoolExecutor(max_workers=3)  # 3 parallel transcriptions
         pending_tasks = {}  # task_id -> Future
         completed_results = {}  # task_id -> transcription text
         
+        # Flag to stop completion thread
+        self.stop_completion_thread = False
+        
         # Separate thread for handling completed transcriptions
         def process_completed_transcriptions():
             next_task_to_check = 0
             
-            while True:
+            while not self.stop_completion_thread:
                 # Check for completed tasks in order
                 if next_task_to_check in completed_results:
                     text = completed_results[next_task_to_check]
@@ -443,7 +459,9 @@ class WhisperStreamingDaemon:
                 
                 if chunk is None:
                     # Shutdown signal - wait for pending tasks
+                    logger.info("Shutting down Local Agreement processor...")
                     executor.shutdown(wait=True)
+                    self.stop_completion_thread = True
                     
                     # Output any remaining unconfirmed text
                     if last_full_text and len(last_full_text) > len(self.local_agreement.confirmed_text):
@@ -459,23 +477,31 @@ class WhisperStreamingDaemon:
                 # Add to context
                 context_audio.extend(chunk)
                 
-                # Limit context size
-                max_samples = int(self.max_buffer_duration * self.sample_rate)
-                if len(context_audio) > max_samples:
-                    context_audio = context_audio[-max_samples:]
+                # Submit task every chunk_duration seconds of audio
+                current_audio_length = len(context_audio) / self.sample_rate
+                needed_length = self.chunk_duration * (task_counter + 1)
                 
-                # Create transcription task
-                task = TranscriptionTask(
-                    task_id=task_counter,
-                    audio_data=np.array(context_audio.copy()),  # Copy to avoid race conditions
-                    timestamp=time.time(),
-                    context_length=len(context_audio)/self.sample_rate
-                )
-                
-                # Submit task to thread pool (non-blocking)
-                future = executor.submit(transcribe_audio, task)
-                pending_tasks[task_counter] = future
-                task_counter += 1
+                if current_audio_length >= needed_length:
+                    # Limit context size
+                    max_samples = int(self.max_buffer_duration * self.sample_rate)
+                    if len(context_audio) > max_samples:
+                        # Keep recent audio plus some context
+                        context_audio = context_audio[-max_samples:]
+                    
+                    # Create transcription task
+                    task = TranscriptionTask(
+                        task_id=task_counter,
+                        audio_data=np.array(context_audio.copy()),  # Copy to avoid race conditions
+                        timestamp=time.time(),
+                        context_length=len(context_audio)/self.sample_rate
+                    )
+                    
+                    # Submit task to thread pool (non-blocking)
+                    future = executor.submit(transcribe_audio, task)
+                    pending_tasks[task_counter] = future
+                    task_counter += 1
+                    
+                    logger.info(f"Submitted task {task.task_id} with {task.context_length:.1f}s audio")
                 
                 # Check for completed tasks
                 completed = []
