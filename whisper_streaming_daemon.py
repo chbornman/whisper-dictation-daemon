@@ -28,9 +28,9 @@ class WhisperStreamingDaemon:
         self.interrupted = False
         self.model_loaded = False
         
-        # Streaming parameters
-        self.chunk_duration = 2.0  # Process 2-second chunks
-        self.overlap_duration = 0.5  # 0.5 second overlap between chunks
+        # Streaming parameters  
+        self.chunk_duration = 3.0  # Total chunk size to process
+        self.stride_duration = 1.0  # Move forward by 1 second each time (2s overlap with 3s chunks)
         self.silence_threshold = 0.01  # Silence detection threshold
         self.audio_queue = queue.Queue()
         self.transcription_queue = queue.Queue()
@@ -38,7 +38,11 @@ class WhisperStreamingDaemon:
         # Buffer for continuous audio
         self.audio_buffer = []
         self.chunk_samples = int(self.chunk_duration * self.sample_rate)
-        self.overlap_samples = int(self.overlap_duration * self.sample_rate)
+        self.stride_samples = int(self.stride_duration * self.sample_rate)
+        
+        # Track previous transcription for deduplication
+        self.previous_text = ""
+        self.last_chunk_text = ""
         
         # Socket for IPC
         self.socket_path = "/tmp/whisper_streaming_daemon.sock"
@@ -118,6 +122,7 @@ class WhisperStreamingDaemon:
         self.recording = True
         self.streaming = True
         self.audio_buffer = []
+        self.last_chunk_text = ""  # Reset deduplication tracker
         
         def audio_callback(indata, frames, time, status):
             if self.recording:
@@ -127,11 +132,11 @@ class WhisperStreamingDaemon:
                 
                 # Check if we have enough for a chunk
                 if len(self.audio_buffer) >= self.chunk_samples:
-                    # Extract chunk with overlap from previous
+                    # Extract full chunk (3 seconds)
                     chunk = np.array(self.audio_buffer[:self.chunk_samples])
                     
-                    # Keep overlap for next chunk
-                    self.audio_buffer = self.audio_buffer[self.chunk_samples - self.overlap_samples:]
+                    # Move forward by stride (1 second), keeping 2 seconds overlap
+                    self.audio_buffer = self.audio_buffer[self.stride_samples:]
                     
                     # Add to processing queue
                     self.audio_queue.put(chunk)
@@ -159,8 +164,31 @@ class WhisperStreamingDaemon:
         
         logger.info("Streaming stopped")
 
+    def find_overlap(self, prev_text, new_text, min_overlap=3):
+        """Find overlapping text between two strings"""
+        if not prev_text or not new_text:
+            return 0
+        
+        prev_words = prev_text.split()
+        new_words = new_text.split()
+        
+        if len(prev_words) < min_overlap or len(new_words) < min_overlap:
+            return 0
+        
+        # Check for overlap at word boundaries
+        max_overlap = min(len(prev_words), len(new_words), 15)  # Check up to 15 words
+        
+        for overlap_size in range(max_overlap, min_overlap - 1, -1):
+            # Check if the last N words of prev match the first N words of new
+            if prev_words[-overlap_size:] == new_words[:overlap_size]:
+                return overlap_size
+        
+        return 0
+    
     def process_audio_chunks(self):
         """Process audio chunks in background thread"""
+        previous_context = ""
+        
         while True:
             try:
                 # Get audio chunk from queue
@@ -186,19 +214,37 @@ class WhisperStreamingDaemon:
                         beam_size=5,
                         best_of=5,
                         temperature=0.0,
-                        condition_on_previous_text=False,  # Don't condition on previous for real-time
+                        condition_on_previous_text=True,  # Use previous context
+                        initial_prompt=previous_context[-250:] if previous_context else None,  # Use last 250 chars as context
                         vad_filter=True,  # Use VAD to filter out silence
                         vad_parameters=dict(
                             min_speech_duration_ms=100,
                             min_silence_duration_ms=100
-                        )
+                        ),
+                        without_timestamps=True  # Disable timestamps for cleaner text
                     )
                     
                     # Collect text from segments
-                    text = " ".join([segment.text.strip() for segment in segments])
+                    full_text = " ".join([segment.text.strip() for segment in segments])
                     
-                    if text:
-                        self.transcription_queue.put(text)
+                    if full_text:
+                        # Better deduplication using word-level overlap detection
+                        if self.last_chunk_text:
+                            overlap_words = self.find_overlap(self.last_chunk_text, full_text)
+                            if overlap_words > 0:
+                                # Remove the overlapping words from the beginning
+                                new_words = full_text.split()[overlap_words:]
+                                new_text = " ".join(new_words)
+                                logger.info(f"Removed {overlap_words} overlapping words")
+                            else:
+                                new_text = full_text
+                        else:
+                            new_text = full_text
+                        
+                        if new_text:
+                            self.transcription_queue.put(new_text)
+                            previous_context = full_text  # Update context for next chunk
+                            self.last_chunk_text = full_text
                         
                 except Exception as e:
                     logger.error(f"Transcription error: {e}")
