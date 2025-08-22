@@ -118,7 +118,10 @@ class WhisperStreamingDaemon:
             self.last_chunk_text = ""
         
         # Socket for IPC
-        self.socket_path = f"/tmp/whisper_streaming_{algorithm}_daemon.sock"
+        if no_streaming:
+            self.socket_path = f"/tmp/whisper_streaming_{algorithm}_nostream_daemon.sock"
+        else:
+            self.socket_path = f"/tmp/whisper_streaming_{algorithm}_daemon.sock"
         self.server_socket = None
         
         # Sound file paths
@@ -608,17 +611,23 @@ class WhisperStreamingDaemon:
         try:
             data = client_socket.recv(1024).decode()
             if data == "STREAM_START":
-                if not self.streaming:
+                if not self.streaming and not self.recording:
                     threading.Thread(target=self.start_streaming_recording).start()
-                    client_socket.send(b"STREAMING")
+                    if self.no_streaming:
+                        client_socket.send(b"RECORDING")
+                    else:
+                        client_socket.send(b"STREAMING")
                 else:
-                    client_socket.send(b"ALREADY_STREAMING")
+                    if self.no_streaming:
+                        client_socket.send(b"ALREADY_RECORDING")
+                    else:
+                        client_socket.send(b"ALREADY_STREAMING")
             elif data == "STREAM_STOP":
                 self.recording = False
                 client_socket.send(b"STOPPED")
             elif data == "STATUS":
-                if self.streaming:
-                    status = "STREAMING"
+                if self.recording:
+                    status = "RECORDING" if self.no_streaming else "STREAMING"
                 elif self.model_loaded:
                     status = "READY"
                 else:
@@ -681,7 +690,10 @@ def main():
     
     # Client mode
     if args.client:
-        socket_path = f"/tmp/whisper_streaming_{args.algorithm}_daemon.sock"
+        if args.no_streaming:
+            socket_path = f"/tmp/whisper_streaming_{args.algorithm}_nostream_daemon.sock"
+        else:
+            socket_path = f"/tmp/whisper_streaming_{args.algorithm}_daemon.sock"
         try:
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             client.connect(socket_path)
@@ -701,12 +713,12 @@ def main():
                 # Then toggle
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.connect(socket_path)
-                if status == "STREAMING":
+                if status in ["STREAMING", "RECORDING"]:
                     client.send(b"STREAM_STOP")
-                    print("Stopped streaming")
+                    print(f"Stopped {'recording' if status == 'RECORDING' else 'streaming'}")
                 else:
                     client.send(b"STREAM_START")
-                    print("Started streaming")
+                    print(f"Started {'recording' if args.no_streaming else 'streaming'}")
             
             response = client.recv(1024).decode()
             if args.client != 'toggle':
