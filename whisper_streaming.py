@@ -263,12 +263,17 @@ class WhisperStreamingDaemon:
     def process_audio_local_agreement(self):
         """Process audio chunks with Local Agreement algorithm"""
         context_audio = []  # Keep growing context
+        last_full_text = ""
         
         while True:
             try:
                 chunk = self.audio_queue.get(timeout=1)
                 
                 if chunk is None:
+                    # Output any remaining unconfirmed text at the end
+                    if last_full_text and len(last_full_text) > len(self.local_agreement.confirmed_text):
+                        remaining = last_full_text[len(self.local_agreement.confirmed_text):]
+                        self.transcription_queue.put(remaining)
                     self.transcription_queue.put(None)
                     continue
                 
@@ -307,6 +312,8 @@ class WhisperStreamingDaemon:
                         if confirmed_text:
                             self.transcription_queue.put(confirmed_text)
                             logger.info(f"Confirmed: {confirmed_text}")
+                        
+                        last_full_text = full_text
                         
                 except Exception as e:
                     logger.error(f"Transcription error: {e}")
@@ -481,6 +488,7 @@ class WhisperStreamingDaemon:
         position = 0
         chunk_samples = int(2.0 * self.sample_rate)
         context_audio = []
+        last_full_text = ""
         
         while position < len(audio):
             # Get next chunk
@@ -507,8 +515,14 @@ class WhisperStreamingDaemon:
                 confirmed = local_agreement.update(full_text)
                 if confirmed:
                     print(confirmed, end=" ", flush=True)
+                last_full_text = full_text
             
             position = end
+        
+        # Output any remaining unconfirmed text at the end
+        if last_full_text and len(last_full_text) > len(local_agreement.confirmed_text):
+            remaining = last_full_text[len(local_agreement.confirmed_text):]
+            print(remaining, end=" ", flush=True)
         
         print()  # Final newline
     
