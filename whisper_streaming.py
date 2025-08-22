@@ -351,8 +351,7 @@ class WhisperStreamingDaemon:
                         self.audio_buffer = []
                         self.audio_queue.put(np.array(chunk_to_process))
 
-        # Now everything is ready - play the sound and start recording
-        self.play_sound_memory(self.start_sound_data)
+        # Set recording flags first
         self.recording = True
         self.streaming = not self.no_streaming
 
@@ -369,6 +368,9 @@ class WhisperStreamingDaemon:
             callback=audio_callback,
             dtype=np.float32,
         ):
+            # Now that audio stream is ready, play the sound
+            self.play_sound_memory(self.start_sound_data)
+            
             while self.recording and not self.interrupted:
                 sd.sleep(100)
 
