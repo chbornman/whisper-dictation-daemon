@@ -299,6 +299,15 @@ class WhisperStreamingDaemon:
         # Play stop sound
         self.play_sound(self.stop_sound)
         
+        # Clean up recording flag file
+        if self.no_streaming:
+            flag_file = "/tmp/whisper_nostream_recording"
+        else:
+            flag_file = "/tmp/whisper_stream_recording"
+        
+        if os.path.exists(flag_file):
+            os.remove(flag_file)
+        
         logger.info("Recording stopped")
 
     def process_audio_local_agreement(self):

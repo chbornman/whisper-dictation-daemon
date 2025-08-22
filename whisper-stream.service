@@ -7,7 +7,7 @@ Type=simple
 User=caleb
 Group=caleb
 WorkingDirectory=/home/caleb/whisper-dictation-daemon
-ExecStart=/usr/bin/python3 /home/caleb/whisper-dictation-daemon/whisper_streaming_daemon.py
+ExecStart=/usr/bin/python3 /home/caleb/whisper-dictation-daemon/whisper_streaming.py
 Restart=always
 RestartSec=5
 

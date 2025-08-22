@@ -1,0 +1,23 @@
+[Unit]
+Description=Whisper Non-Streaming Transcription Daemon
+After=multi-user.target
+
+[Service]
+Type=simple
+User=caleb
+Group=caleb
+WorkingDirectory=/home/caleb/whisper-dictation-daemon
+ExecStart=/usr/bin/python3 /home/caleb/whisper-dictation-daemon/whisper_streaming.py -n
+Restart=always
+RestartSec=5
+
+# Environment variables for Wayland/wtype
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+# Python environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
