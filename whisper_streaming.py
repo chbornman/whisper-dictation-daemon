@@ -58,28 +58,24 @@ class LocalAgreementBuffer:
     def update(self, new_text, task_id):
         """Update with new transcription and return confirmed text if any"""
         with self.lock:
-            self.history.append((task_id, new_text))
+            # Just keep the last n transcriptions, regardless of task_id
+            self.history.append(new_text)
             
-            # Sort by task_id to maintain order
-            sorted_history = sorted(list(self.history), key=lambda x: x[0])
-            texts = [text for _, text in sorted_history]
-            
-            if len(texts) < self.n:
+            if len(self.history) < self.n:
                 return None  # Not enough history yet
             
-            # Only check agreement if we have consecutive task IDs
-            task_ids = [tid for tid, _ in sorted_history]
-            if task_ids[-1] - task_ids[0] != len(task_ids) - 1:
-                return None  # Missing some tasks in between
+            # Get the last n texts
+            recent_texts = list(self.history)
             
-            # Find common prefix among all texts in history
-            common_prefix = self.find_common_prefix(texts)
+            # Find common prefix among recent texts
+            common_prefix = self.find_common_prefix(recent_texts)
             
             # Check if we have new confirmed text
             if common_prefix and len(common_prefix) > len(self.confirmed_text):
                 # Find the new portion
                 new_confirmed = common_prefix[len(self.confirmed_text):]
                 self.confirmed_text = common_prefix
+                logger.info(f"Agreement found! New text: {new_confirmed[:50]}...")
                 return new_confirmed
             
             return None
@@ -409,23 +405,23 @@ class WhisperStreamingDaemon:
         
         # Separate thread for handling completed transcriptions
         def process_completed_transcriptions():
-            next_task_to_check = 0
+            processed_tasks = set()
             
             while not self.stop_completion_thread:
-                # Check for completed tasks in order
-                if next_task_to_check in completed_results:
-                    text = completed_results[next_task_to_check]
-                    
-                    # Update local agreement buffer
-                    confirmed_text = self.local_agreement.update(text, next_task_to_check)
-                    
-                    if confirmed_text:
-                        self.transcription_queue.put(confirmed_text)
-                        logger.info(f"Confirmed: {confirmed_text[:50]}...")
-                    
-                    # Clean up
-                    del completed_results[next_task_to_check]
-                    next_task_to_check += 1
+                # Process any available results
+                for task_id in list(completed_results.keys()):
+                    if task_id not in processed_tasks:
+                        text = completed_results[task_id]
+                        
+                        # Update local agreement buffer
+                        confirmed_text = self.local_agreement.update(text, task_id)
+                        
+                        if confirmed_text:
+                            self.transcription_queue.put(confirmed_text)
+                            logger.info(f"Confirmed: {confirmed_text[:50]}...")
+                        
+                        processed_tasks.add(task_id)
+                        del completed_results[task_id]
                     
                 time.sleep(0.01)  # Small delay to avoid busy waiting
         
