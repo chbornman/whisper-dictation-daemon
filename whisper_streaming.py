@@ -124,9 +124,9 @@ class WhisperStreamingDaemon:
             self.socket_path = f"/tmp/whisper_streaming_{algorithm}_daemon.sock"
         self.server_socket = None
         
-        # Sound file paths
-        self.start_sound = "/home/caleb/projects/whisper-dictation-daemon/snare.mp3"
-        self.stop_sound = "/home/caleb/projects/whisper-dictation-daemon/hihat.mp3"
+        # Sound file paths (WAV for faster playback)
+        self.start_sound = "/home/caleb/projects/whisper-dictation-daemon/snare.wav"
+        self.stop_sound = "/home/caleb/projects/whisper-dictation-daemon/hihat.wav"
         
         # Load model once at startup
         self.load_model()
@@ -186,15 +186,24 @@ class WhisperStreamingDaemon:
         sys.exit(0)
 
     def play_sound(self, sound_file):
-        """Play a sound file using ffplay in background"""
+        """Play a sound file using aplay (faster) or ffplay as fallback"""
         try:
+            # Try aplay first (faster startup)
             subprocess.Popen(
-                ["ffplay", "-nodisp", "-autoexit", sound_file],
+                ["aplay", "-q", sound_file],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-        except Exception as e:
-            logger.error(f"Failed to play sound {sound_file}: {e}")
+        except FileNotFoundError:
+            # Fallback to ffplay if aplay not available
+            try:
+                subprocess.Popen(
+                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", sound_file],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            except Exception as e:
+                logger.error(f"Failed to play sound {sound_file}: {e}")
 
     def start_streaming_recording(self):
         """Start recording with streaming transcription"""
